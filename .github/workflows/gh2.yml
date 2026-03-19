@@ -21,7 +21,7 @@ jobs:
       matrix:
         runner_id: [1,2,3,4,5,6,7]
 
-    uses: ./.github/workflows/_proxy-slot.yml
+    uses: ./.github/workflows/slot.yml
     with:
       runner_id: ${{ matrix.runner_id }}
 
