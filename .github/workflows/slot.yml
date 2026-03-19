@@ -11,10 +11,6 @@ jobs:
   run:
     runs-on: ubuntu-22.04
 
-    concurrency:
-      group: proxy-slot-gh2-${{ inputs.runner_id }}
-      cancel-in-progress: true
-
     env:
       RUNNER_ID: ${{ inputs.runner_id }}
       VPS_IP: ${{ secrets.VPS_IP }}
