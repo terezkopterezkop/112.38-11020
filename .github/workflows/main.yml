@@ -1,0 +1,108 @@
+name: Pool GH2
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gh2-pool
+  cancel-in-progress: true
+
+jobs:
+  run:
+    name: Slot ${{ matrix.runner_id }}
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+
+    env:
+      RUNNER_ID: ${{ matrix.runner_id }}
+      VPS_IP: ${{ secrets.VPS_IP }}
+
+    steps:
+      - name: Install
+        run: |
+          sudo apt update
+          sudo apt install -y squid autossh curl
+
+      - name: Squid
+        run: |
+          sudo tee /etc/squid/squid.conf >/dev/null <<'EOF'
+          http_port 3128
+          acl all src 0.0.0.0/0
+          http_access allow all
+          EOF
+          sudo systemctl restart squid
+
+      - name: SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/key
+          chmod 600 ~/.ssh/key
+
+          cat > ~/.ssh/config <<EOF
+          Host vps
+            HostName ${{ secrets.VPS_IP }}
+            User root
+            IdentityFile ~/.ssh/key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          EOF
+
+          ssh vps "echo OK"
+
+      - name: Tunnel
+        run: |
+          REMOTE_PORT=$((11000 + RUNNER_ID))
+          echo "PORT=$REMOTE_PORT" >> $GITHUB_ENV
+
+          ssh vps "fuser -k ${REMOTE_PORT}/tcp || true"
+
+          autossh -M 0 -N -f \
+            -o ExitOnForwardFailure=yes \
+            -R 0.0.0.0:${REMOTE_PORT}:localhost:3128 \
+            vps
+
+          sleep 5
+
+          ssh vps "ss -lnt | grep :${REMOTE_PORT}" || exit 1
+
+      - name: Verify
+        run: |
+          ssh vps "curl -x http://127.0.0.1:${PORT} -s --max-time 10 https://api.ipify.org" || exit 1
+
+      - name: Register
+        run: |
+          ssh vps "
+            touch /var/www/html/proxies-gh2.txt /var/www/html/proxies-gh2-meta.txt
+
+            grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/x.$$ 2>/dev/null || true
+            echo '${RUNNER_ID}|${VPS_IP}:${PORT}' >> /tmp/x.$$
+            sort -t'|' -k1,1n /tmp/x.$$ > /var/www/html/proxies-gh2-meta.txt
+            cut -d'|' -f2 /var/www/html/proxies-gh2-meta.txt > /var/www/html/proxies-gh2.txt
+            rm -f /tmp/x.$$
+          "
+
+      - name: Alive
+        run: sleep 720
+
+      - name: Cleanup
+        if: always()
+        run: |
+          ssh vps "
+            grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/x.$$ 2>/dev/null || true
+            sort -t'|' -k1,1n /tmp/x.$$ > /var/www/html/proxies-gh2-meta.txt
+            cut -d'|' -f2 /var/www/html/proxies-gh2-meta.txt > /var/www/html/proxies-gh2.txt
+            rm -f /tmp/x.$$
+          "
+
+      - name: Kill
+        if: always()
+        run: pkill autossh || true
