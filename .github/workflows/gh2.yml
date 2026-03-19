@@ -1,0 +1,64 @@
+name: Proxy Pool GH2 (VPS 2)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxy-gh2
+  cancel-in-progress: true
+
+jobs:
+
+  # 🔹 ВОЛНА 1 (1–7)
+  wave1:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [1,2,3,4,5,6,7]
+
+    uses: ./.github/workflows/_proxy-slot.yml
+    with:
+      runner_id: ${{ matrix.runner_id }}
+
+  # 🔹 ПАУЗА
+  delay1:
+    runs-on: ubuntu-22.04
+    needs: wave1
+    steps:
+      - run: sleep 180
+
+  # 🔹 ВОЛНА 2 (8–14)
+  wave2:
+    needs: delay1
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [8,9,10,11,12,13,14]
+
+    uses: ./.github/workflows/_proxy-slot.yml
+    with:
+      runner_id: ${{ matrix.runner_id }}
+
+  # 🔹 ПАУЗА
+  delay2:
+    runs-on: ubuntu-22.04
+    needs: wave2
+    steps:
+      - run: sleep 180
+
+  # 🔹 ВОЛНА 3 (15–20)
+  wave3:
+    needs: delay2
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [15,16,17,18,19,20]
+
+    uses: ./.github/workflows/_proxy-slot.yml
+    with:
+      runner_id: ${{ matrix.runner_id }}
