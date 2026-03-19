@@ -3,7 +3,7 @@ name: Proxy Pool GH2 (VPS 2)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: read
@@ -124,7 +124,7 @@ jobs:
 
       - name: Keep alive
         run: |
-          sleep 720
+          sleep 840
 
       - name: Cleanup proxy entry
         if: always()
