@@ -37,6 +37,9 @@ jobs:
           EOF
           sudo systemctl restart squid
 
+      - name: Stagger
+        run: sleep $((RUNNER_ID * 3))
+  
       - name: SSH
         run: |
           mkdir -p ~/.ssh
