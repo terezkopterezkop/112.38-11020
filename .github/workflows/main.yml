@@ -26,7 +26,7 @@ jobs:
       - name: Install
         run: |
           sudo apt update
-          sudo apt install -y squid autossh curl
+          sudo apt install -y squid autossh curl procps
 
       - name: Squid
         run: |
@@ -36,10 +36,12 @@ jobs:
           http_access allow all
           EOF
           sudo systemctl restart squid
+          sleep 2
+          ss -lnt | grep ':3128' || exit 1
 
       - name: Stagger
-        run: sleep $((RUNNER_ID * 3))
-  
+        run: sleep $((RUNNER_ID * 6))
+
       - name: SSH
         run: |
           mkdir -p ~/.ssh
@@ -53,55 +55,79 @@ jobs:
             IdentityFile ~/.ssh/key
             StrictHostKeyChecking no
             UserKnownHostsFile /dev/null
+            LogLevel ERROR
+            ConnectTimeout 10
+            ServerAliveInterval 30
+            ServerAliveCountMax 3
           EOF
 
           ssh vps "echo OK"
 
-      - name: Tunnel
+      - name: Run slot
         run: |
-          REMOTE_PORT=$((11000 + RUNNER_ID))
-          echo "PORT=$REMOTE_PORT" >> $GITHUB_ENV
+          PORT=$((11000 + RUNNER_ID))
+          echo "PORT=$PORT" >> "$GITHUB_ENV"
 
-          ssh vps "fuser -k ${REMOTE_PORT}/tcp || true"
+          start_tunnel() {
+            ssh vps "fuser -k ${PORT}/tcp || true"
+            pkill -f "autossh.*0.0.0.0:${PORT}:localhost:3128" || true
 
-          autossh -M 0 -N -f \
-            -o ExitOnForwardFailure=yes \
-            -R 0.0.0.0:${REMOTE_PORT}:localhost:3128 \
-            vps
+            autossh -M 0 -N -f \
+              -o ExitOnForwardFailure=yes \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=3 \
+              -R 0.0.0.0:${PORT}:localhost:3128 \
+              vps
+          }
 
+          verify_tunnel() {
+            ssh vps "ss -lnt | grep ':${PORT} '" >/dev/null 2>&1 || return 1
+            ssh vps "curl -x http://127.0.0.1:${PORT} -s --max-time 10 https://api.ipify.org" >/dev/null 2>&1 || return 1
+            return 0
+          }
+
+          register_slot() {
+            ssh vps "
+              touch /var/www/html/proxies-gh2.txt /var/www/html/proxies-gh2-meta.txt
+              grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/x.$$ 2>/dev/null || true
+              echo '${RUNNER_ID}|${VPS_IP}:${PORT}' >> /tmp/x.$$
+              sort -t'|' -k1,1n /tmp/x.$$ > /var/www/html/proxies-gh2-meta.txt
+              cut -d'|' -f2 /var/www/html/proxies-gh2-meta.txt > /var/www/html/proxies-gh2.txt
+              rm -f /tmp/x.$$
+            "
+          }
+
+          cleanup_slot() {
+            ssh vps "
+              touch /var/www/html/proxies-gh2.txt /var/www/html/proxies-gh2-meta.txt
+              grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/x.$$ 2>/dev/null || true
+              sort -t'|' -k1,1n /tmp/x.$$ > /var/www/html/proxies-gh2-meta.txt
+              cut -d'|' -f2 /var/www/html/proxies-gh2-meta.txt > /var/www/html/proxies-gh2.txt
+              rm -f /tmp/x.$$
+            "
+            pkill -f "autossh.*0.0.0.0:${PORT}:localhost:3128" || true
+          }
+
+          trap cleanup_slot EXIT
+
+          start_tunnel
           sleep 5
+          verify_tunnel || exit 1
+          register_slot
 
-          ssh vps "ss -lnt | grep :${REMOTE_PORT}" || exit 1
+          END=$(( $(date +%s) + 720 ))
 
-      - name: Verify
-        run: |
-          ssh vps "curl -x http://127.0.0.1:${PORT} -s --max-time 10 https://api.ipify.org" || exit 1
+          while [ "$(date +%s)" -lt "$END" ]; do
+            if ! pgrep -af "autossh.*0.0.0.0:${PORT}:localhost:3128" >/dev/null 2>&1; then
+              start_tunnel
+              sleep 5
+            fi
 
-      - name: Register
-        run: |
-          ssh vps "
-            touch /var/www/html/proxies-gh2.txt /var/www/html/proxies-gh2-meta.txt
+            if ! verify_tunnel; then
+              start_tunnel
+              sleep 5
+              verify_tunnel || true
+            fi
 
-            grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/x.$$ 2>/dev/null || true
-            echo '${RUNNER_ID}|${VPS_IP}:${PORT}' >> /tmp/x.$$
-            sort -t'|' -k1,1n /tmp/x.$$ > /var/www/html/proxies-gh2-meta.txt
-            cut -d'|' -f2 /var/www/html/proxies-gh2-meta.txt > /var/www/html/proxies-gh2.txt
-            rm -f /tmp/x.$$
-          "
-
-      - name: Alive
-        run: sleep 720
-
-      - name: Cleanup
-        if: always()
-        run: |
-          ssh vps "
-            grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/x.$$ 2>/dev/null || true
-            sort -t'|' -k1,1n /tmp/x.$$ > /var/www/html/proxies-gh2-meta.txt
-            cut -d'|' -f2 /var/www/html/proxies-gh2-meta.txt > /var/www/html/proxies-gh2.txt
-            rm -f /tmp/x.$$
-          "
-
-      - name: Kill
-        if: always()
-        run: pkill autossh || true
+            sleep 15
+          done
